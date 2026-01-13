@@ -23,7 +23,10 @@ use std::path::Path;
 const MNT_PATH: &str = "/usb";      
 
 /// number of retries if a problem occurs
-const RETRY_COUNT: i32 = 3;                                                                    
+const RETRY_COUNT: i32 = 3;
+
+/// flag to allow debugging with a vfs mounting
+const DEBUG_VFS: i32 = 0;
 
 /// struct to define the usb mass storage device with its handlers and address
 pub struct UsbMassStorage{
@@ -37,23 +40,17 @@ pub struct UsbMassStorage{
     handle: msc_host_device_handle_t,             
 
     /// handle to the mounted VFS instance                                              
-    vfs: msc_host_vfs_handle_t,     
-
-    /// count the absence of MSC events
-    enum_fail_counter: u32,                                                            
+    vfs: msc_host_vfs_handle_t,                                                                
 }
 
 impl UsbMassStorage{
     /// init of a new mass storage device
     pub fn new() -> Self{
-        unsafe{
-            UsbMassStorage{
-                pending_addr: -1,
-                retries_left: 0,
-                handle: core::ptr::null_mut(),
-                vfs: core::ptr::null_mut(),
-                enum_fail_counter: 0,
-            }
+        UsbMassStorage{
+            pending_addr: -1,
+            retries_left: 0,
+            handle: core::ptr::null_mut(),
+            vfs: core::ptr::null_mut(),
         }
     }
 
@@ -161,9 +158,6 @@ impl UsbMassStorage{
 
             // attempt to open the msc device and mount its filesystem
             self.try_open_and_mount();
-
-            // detect and recover from failed USB enumeration
-            self.check_enum_stuck();
         }
     }
 
@@ -188,13 +182,13 @@ impl UsbMassStorage{
 
         if ret == ESP_OK{
             self.handle = handle;
-            if self.mount_vfs(){
-                self.pending_addr = -1;
-                self.retries_left = 0;
-            }
-            else{
-                self.close_device();
-                self.retries_left -= 1; 
+            self.pending_addr = -1;
+            self.retries_left = 0;
+            if DEBUG_VFS == 1{
+                if !self.mount_vfs(){
+                    self.close_device();
+                    self.retries_left -= 1; 
+                }
             }
         }
         else if ret == ESP_ERR_INVALID_STATE{
@@ -237,7 +231,11 @@ impl UsbMassStorage{
             self.vfs = vfs_handle;
             log::info!("VFS mounted at {}", MNT_PATH);
 
-            self.ls_all_device(Path::new(MNT_PATH));
+            let ls_result_debug = self.ls_all_device(Path::new(MNT_PATH));
+            match ls_result_debug {
+                Ok(()) => log::info!("-- ls successfully done --"),
+                Err(e) => log::error!("-- ls error {} --", e)
+            }
             true
         }
         else{
@@ -250,37 +248,6 @@ impl UsbMassStorage{
         if !self.vfs.is_null(){
             unsafe{ msc_host_vfs_unregister(self.vfs) };
             self.vfs = core::ptr::null_mut();
-        }
-    }
-
-    fn check_enum_stuck(&mut self){
-        if self.pending_addr >= 0 {
-            self.enum_fail_counter = 0;
-            return;
-        }
-
-        if !self.vfs.is_null(){
-            self.enum_fail_counter = 0;
-            return;
-        }
-
-        self.enum_fail_counter += 1;
-        
-        if self.enum_fail_counter > 300{
-            log::warn!("USB enumeration seems stuck -> resetting USB host...");
-            unsafe{
-                usb_host_uninstall();
-            }
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            unsafe{
-                usb_host_install(&usb_host_config_t{
-                    skip_phy_setup: false,
-                    root_port_unpowered: false,
-                    intr_flags: ESP_INTR_FLAG_LEVEL1 as i32,
-                    enum_filter_cb: None,
-                });
-            }
-            self.enum_fail_counter = 0;
         }
     }
 
