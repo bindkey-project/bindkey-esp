@@ -37,7 +37,10 @@ pub struct UsbMassStorage{
     handle: msc_host_device_handle_t,             
 
     /// handle to the mounted VFS instance                                              
-    vfs: msc_host_vfs_handle_t,                                                                 
+    vfs: msc_host_vfs_handle_t,     
+
+    /// count the absence of MSC events
+    enum_fail_counter: u32,                                                            
 }
 
 impl UsbMassStorage{
@@ -49,19 +52,23 @@ impl UsbMassStorage{
                 retries_left: 0,
                 handle: core::ptr::null_mut(),
                 vfs: core::ptr::null_mut(),
+                enum_fail_counter: 0,
             }
         }
     }
 
+    /// host initialisation, before trying to detect the usb hard drive
     pub fn init_host() -> Result<(), i32>{
+        std::thread::sleep(std::time::Duration::from_millis(500));
         unsafe{
             let host_cfg = usb_host_config_t{
-                skip_phy_setup: false,
-                root_port_unpowered: false,
-                intr_flags: ESP_INTR_FLAG_LEVEL1 as i32,
-                enum_filter_cb: None,
+                skip_phy_setup: false,                   // let ESP-IDF configure automatically the PHY USB 
+                root_port_unpowered: false,              // USB port powers the USB device
+                intr_flags: ESP_INTR_FLAG_LEVEL1 as i32, // interruption flag, low priority
+                enum_filter_cb: None,                    // no complementary enum callback
             };
 
+            // install the USB Host driver
             let err = usb_host_install(&host_cfg);
             if err != ESP_OK{
                 log::error!("usb_host_install failed : {}", err);
@@ -69,16 +76,21 @@ impl UsbMassStorage{
             }
 
             log::info!("USB Host installed.");
+            std::thread::sleep(std::time::Duration::from_millis(200));
 
+            // mass storage class (msc) host driver configuration
             let msc_cfg = msc_host_driver_config_t{
-                task_priority: 5,
-                stack_size: 4096,
-                core_id: 0,
-                callback: Some(crate::usb_mass_storage::callback::msc_event_cb),
-                callback_arg: core::ptr::null_mut(),
-                create_backround_task: true,
+                task_priority: 5,                                                // priority of the msc background task
+                stack_size: 4096,                                                // stack size allocated for the msc task
+                core_id: 0,                                                      // CPU core on which the msc task will run
+                callback: Some(crate::usb_mass_storage::callback::msc_event_cb), // callback function triggered on msc events (connect/disconnect)
+                callback_arg: core::ptr::null_mut(),                             // no custom argument for the callback
+                create_backround_task: true,                                     // automatically create the background msc handling task
             };
 
+            std::thread::sleep(std::time::Duration::from_millis(100));
+
+            // install the msc host driver
             let ret = msc_host_install(&msc_cfg);
             if ret != ESP_OK{
                 log::error!("msc_host_install failed : {}", ret);
@@ -96,24 +108,36 @@ impl UsbMassStorage{
         !self.vfs.is_null()
     }
 
+    /// handles raw msc events received from the USB Host stack => reacts to device connection, disconnection events and updates the internal state accordingly
     pub fn handle_raw_event(&mut self, event: &msc_host_event_t){
         match event.event{
+            // the usb mass storage device has been connected
             e if e == msc_host_event_t_MSC_DEVICE_CONNECTED => {
+                // get the usb device address during enumeration
                 let addr = unsafe { event.device.address };
                 log::info!("MSC CONNECTED, addr = {}", addr);
-
+                
+                // store the pending device address
                 self.pending_addr = addr as i32;
+                // reset retry counter for device opening attempts
                 self.retries_left = RETRY_COUNT;
 
+                // reset device handle and vfs pointer  
                 self.handle = core::ptr::null_mut();
                 self.vfs = core::ptr::null_mut();
             }
 
+            // the usb mass storage device has been disconnected   
             e if e == msc_host_event_t_MSC_DEVICE_DISCONNECTED => {
                 log::info!("MSC DISCONNECTED");
-
+                
+                // unmount the virtual file system 
                 self.unmount_vfs();
+                
+                // close the msc device handle and release associated resources
                 self.close_device();
+                
+                // reset internal state
                 self.pending_addr = -1;
                 self.retries_left = 0;
             }
@@ -135,12 +159,17 @@ impl UsbMassStorage{
             // handling MSC events
             msc_host_handle_events(10);
 
-            /// 
+            // attempt to open the msc device and mount its filesystem
             self.try_open_and_mount();
+
+            // detect and recover from failed USB enumeration
+            self.check_enum_stuck();
         }
     }
 
+    /// attempts to open a MSC device and mount a filesystem
     fn try_open_and_mount(&mut self){
+        //abort 
         if self.pending_addr < 0 || self.retries_left <= 0 {
             return;
         }
@@ -221,6 +250,37 @@ impl UsbMassStorage{
         if !self.vfs.is_null(){
             unsafe{ msc_host_vfs_unregister(self.vfs) };
             self.vfs = core::ptr::null_mut();
+        }
+    }
+
+    fn check_enum_stuck(&mut self){
+        if self.pending_addr >= 0 {
+            self.enum_fail_counter = 0;
+            return;
+        }
+
+        if !self.vfs.is_null(){
+            self.enum_fail_counter = 0;
+            return;
+        }
+
+        self.enum_fail_counter += 1;
+        
+        if self.enum_fail_counter > 300{
+            log::warn!("USB enumeration seems stuck -> resetting USB host...");
+            unsafe{
+                usb_host_uninstall();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            unsafe{
+                usb_host_install(&usb_host_config_t{
+                    skip_phy_setup: false,
+                    root_port_unpowered: false,
+                    intr_flags: ESP_INTR_FLAG_LEVEL1 as i32,
+                    enum_filter_cb: None,
+                });
+            }
+            self.enum_fail_counter = 0;
         }
     }
 
