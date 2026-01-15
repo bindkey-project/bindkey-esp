@@ -13,6 +13,12 @@ pub fn set_global_mass_storage(driver: &mut UsbMassStorage){
     }
 }
 
+pub fn get_global_mass_storage() -> Option<&'static mut UsbMassStorage>{
+    unsafe{
+        GLOBAL_MSC.as_mut()
+    }
+}
+
 /// callback function when an msc event is triggered
 pub unsafe extern "C" fn msc_event_cb(event: *const msc_host_event_t, _arg: *mut core::ffi::c_void){
     if GLOBAL_MSC.is_null(){

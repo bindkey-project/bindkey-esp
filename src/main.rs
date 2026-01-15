@@ -3,6 +3,7 @@ mod spi_link;
 
 use crate::usb_mass_storage::*;
 use crate::spi_link::*;
+use crate::task::start_spi_task;
 
 fn main() {
     // It is necessary to call this function once. Otherwise, some patches to the runtime
@@ -25,20 +26,23 @@ fn main() {
 
     log::info!("USB Host initialized.");
 
-    //uniquement test
-    let mut spi = SpiLink::new();
-    if let Err(e) = SpiLink::init(&mut spi){
+    let spi_static: &'static mut SpiLink = Box::leak(Box::new(SpiLink::new()));
+
+    if let Err(e) = SpiLink::init(spi_static){
         log::error!("SPI init failed: {}", e);
         return;
     }
-
     log::info!("SPI Link Slave initialized.");
-    spi.run();
 
-    /*loop{
-        //usb.poll();
-       
+    if let Err(e) = start_spi_task(spi_static){
+        log::error!("Failed to start SPI task: {}", e);
+        return;
+    }
+    log::info!("SPI task started");
+
+    loop{
+        usb.poll();
 
         std::thread::sleep(std::time::Duration::from_millis(100));
-    }*/
+    }
 }

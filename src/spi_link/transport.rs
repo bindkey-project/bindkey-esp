@@ -3,6 +3,9 @@ use esp_idf_sys::*;
 
 use super::pins::*;
 use super::protocol::*;
+use crate::usb_mass_storage::UsbMassStorage;
+use crate::usb_mass_storage::block_device::*;
+use crate::usb_mass_storage::get_global_mass_storage;
 
 struct DmaBuf{
     ptr: *mut u8,
@@ -64,12 +67,21 @@ impl Drop for DmaBuf{
     }
 }
 
+const HDR_LEN: usize = core::mem::size_of::<Header>();
+const RX_LEN: usize = HDR_LEN + MAX_PAYLOAD;
 pub struct SpiLink{
     inited: bool,
     //2-phase storage
     resp_ready: bool,
     resp_len: usize,
-    resp_buf: [u8; core::mem::size_of::<Header>() + MAX_PAYLOAD]
+    resp_buf: [u8; core::mem::size_of::<Header>() + MAX_PAYLOAD],
+
+    //future for stateless chunking
+    //chunk_idx = req.reserved (u16)
+    //chunk_len returned in resp.arg1
+    //offset_bytes = chunk_idx * MAX_PAYLOAD (rule we’ll enforce later)
+
+    block_buf: [u8; MAX_PAYLOAD]
 }
 
 impl SpiLink {
@@ -78,7 +90,8 @@ impl SpiLink {
             inited: false,
             resp_ready: false,
             resp_len: 0,
-            resp_buf: [0u8; core::mem::size_of::<Header>() + MAX_PAYLOAD],
+            resp_buf: [0u8; RX_LEN],
+            block_buf: [0u8; MAX_PAYLOAD],
         }
     }
 
@@ -98,7 +111,7 @@ impl SpiLink {
             buscfg.data5_io_num = -1;
             buscfg.data6_io_num = -1;
             buscfg.data7_io_num = -1;
-            buscfg.max_transfer_sz = (core::mem::size_of::<Header>() + MAX_PAYLOAD) as i32; // 528 bytes
+            buscfg.max_transfer_sz = RX_LEN as i32; // 528 bytes
 
 
             let mut slvcfg: spi_slave_interface_config_t = core::mem::zeroed();
@@ -125,36 +138,69 @@ impl SpiLink {
         }
     }
 
-    fn arm_response(&mut self, req: &Header, status: i32, payload: &[u8]){
-        let resp_hdr = Header::response_for(req, status);
+    fn arm_response_with_arg1(&mut self, req: &Header, status: i32, arg1: u32, payload: &[u8]){
+        let mut resp_hdr = Header::response_for(req, status);
+        resp_hdr.arg1 = arg1;
 
         let hdr_bytes = unsafe{
             core::slice::from_raw_parts(
                 (&resp_hdr as *const Header) as *const u8,
-                core::mem::size_of::<Header>(),
+                HDR_LEN,
             )
         };
 
-        self.resp_buf[..core::mem::size_of::<Header>()].copy_from_slice(hdr_bytes);
+        self.resp_buf[..HDR_LEN].copy_from_slice(hdr_bytes);
 
-        let max_pay = self.resp_buf.len() - core::mem::size_of::<Header>();
+        let max_pay = RX_LEN - HDR_LEN;
         let pay_len = core::cmp::min(payload.len(), max_pay);
         if pay_len > 0{
-            let off = core::mem::size_of::<Header>();
-            self.resp_buf[off..off + pay_len].copy_from_slice(&payload[..pay_len]);
-            self.resp_len = off + pay_len;
+            self.resp_buf[HDR_LEN..HDR_LEN + pay_len].copy_from_slice(&payload[..pay_len]);
+            self.resp_len = HDR_LEN + pay_len;
         }
         else{
-            self.resp_len = core::mem::size_of::<Header>();
+            self.resp_len = HDR_LEN;
         }
 
         self.resp_ready = true;
-        log::info!("spi_link: armed response len={}", self.resp_len);
+        log::info!("spi_link: armed response len={}, arg1={}", self.resp_len, arg1);
 
         unsafe{
             gpio_set_level(PIN_READY as gpio_num_t, 1);
         }
 
+    }
+
+    fn arm_response_from_block_buf(&mut self, req: &Header, status: i32, arg1: u32, len: usize){
+        let mut resp_hdr = Header::response_for(req, status);
+        resp_hdr.arg1 = arg1;
+
+        // header
+        let hdr_bytes = unsafe{
+            core::slice::from_raw_parts((&resp_hdr as *const Header) as *const u8, HDR_LEN)
+        };
+        self.resp_buf[..HDR_LEN].copy_from_slice(hdr_bytes);
+
+        // payload from self.block_buf without surviving borrow
+        let pay_len = core::cmp::min(len, MAX_PAYLOAD);
+        if pay_len > 0 {
+            self.resp_buf[HDR_LEN..HDR_LEN + pay_len].copy_from_slice(&self.block_buf[..pay_len]);
+            self.resp_len = HDR_LEN + pay_len;
+        }
+        else{
+            self.resp_len = HDR_LEN;
+        }
+
+        self.resp_ready = true;
+        log::info!("spi_link: armed response len={}, arg1={}", self.resp_len, arg1);
+        unsafe{ 
+            gpio_set_level(PIN_READY as gpio_num_t, 1);
+        }
+    }
+
+
+    #[inline]
+    fn arm_response(&mut self, req: &Header, status: i32, payload: &[u8]){
+        self.arm_response_with_arg1(req, status, 0, payload);
     }
 
     fn disarm_response(&mut self){
@@ -165,10 +211,14 @@ impl SpiLink {
         }
     }
 
+    fn ensure_capacity_known(usb: &mut UsbMassStorage){
+        if usb.block_size == 0 || usb.block_count == 0{
+            let _ = usb.bd_refresh_capacity();
+        }
+    }
+
     pub fn run(&mut self) -> ! {
         assert!(self.inited);
-
-        const RX_LEN: usize = core::mem::size_of::<Header>() + MAX_PAYLOAD;
 
         let mut rx_dma = DmaBuf::new(RX_LEN);
         let mut tx_dma = DmaBuf::new(RX_LEN);
@@ -213,14 +263,9 @@ impl SpiLink {
             let req = unsafe{
                 core::ptr::read_unaligned(rx.as_ptr() as *const Header)
             };
-            
+
             if !req.is_valid(){
                 log::warn!("spi_link: invalid header");
-                log::info!(
-                    "RX[0..4] = {:02X} {:02X} {:02X} {:02X}",
-                    rx[0], rx[1], rx[2], rx[3]
-                );
-
                 continue;
             }
 
@@ -233,36 +278,150 @@ impl SpiLink {
             let seq = req.seq;
             let arg0 = req.arg0;
             let arg1 = req.arg1;
-            log::info!("spi_link: cmd={:?} seq={} arg0={} arg1={}", cmd, seq, arg0, arg1);
+            let chunk_idx = req.reserved;
+            log::info!("spi_link: cmd={:?} seq={} arg0={} arg1={} chunk_idx={}", cmd, seq, arg0, arg1, chunk_idx);
 
             match cmd {
                 Cmd::GetStatus => {
                     // payload: 1 byte status (0/1/2)
-                    // dummy: Ready
-                    let payload = [2u8];
+                    let payload = if let Some(usb) = get_global_mass_storage(){
+                        let status = usb.bd_status();
+                        [match status {
+                            BlockDevStatus::NotPresent => 0,
+                            BlockDevStatus::NotReady => 1,
+                            BlockDevStatus::Ready => 2,
+                        }]
+                    }
+                    else{
+                        [0u8]
+                    };
                     log::info!("spi_link: REQ GetStatus seq={}", seq);
                     self.arm_response(&req, ESP_OK, &payload);
                 }
 
                 Cmd::GetCapacity => {
                     // payload: 8 bytes (block_size, block_count)
-                    // dummy values for now
-                    let cap = payload::encode_capacity(512, 123456);
-                    log::info!("spi_link: REQ GetCapacity seq={}", seq);
-                    self.arm_response(&req, ESP_OK, &cap);
+                    let Some(usb) = get_global_mass_storage() else{
+                        self.arm_response(&req, ESP_ERR_INVALID_STATE, &[]);
+                        continue;
+                    };
+
+                    match usb.bd_refresh_capacity(){
+                        Ok((bs, bc)) => {
+                            let capacity = payload::encode_capacity(bs, bc);
+                            log::info!("spi_link: REQ GetCapacity seq={}", seq);
+                            self.arm_response_with_arg1(&req, ESP_OK, capacity.len() as u32, &capacity);
+                        }
+                        Err(e) => {
+                            self.arm_response(&req, e, &[]);
+                        }
+                    }
                 }
 
                 Cmd::Read => {
-                    // later: read blocks from UsbMassStorage
-                    log::info!("spi_link: REQ Read seq={} lba={} nblocks={}", seq, arg0, arg1);
-                    self.arm_response(&req, ESP_ERR_NOT_SUPPORTED, &[]);
+                    let lba = arg0;
+                    let nblocks_total = arg1;
+
+                    let Some(usb) = get_global_mass_storage() else{
+                        self.arm_response(&req, ESP_ERR_INVALID_STATE, &[]);
+                        continue;
+                    };
+
+                    //test
+                    if nblocks_total != 1{
+                        self.arm_response(&req, ESP_ERR_NOT_SUPPORTED, &[]);
+                        continue;
+                    }
+                    if chunk_idx != 0 {
+                        self.arm_response(&req, ESP_ERR_INVALID_ARG, &[]);
+                        continue;
+                    }
+
+                    Self::ensure_capacity_known(usb);
+                    let bs = usb.block_size as usize;
+                    if bs == 0{
+                        self.arm_response(&req, ESP_ERR_INVALID_STATE, &[]);
+                        continue;
+                    }
+                    if bs > MAX_PAYLOAD{
+                        self.arm_response(&req, ESP_ERR_INVALID_SIZE, &[]);
+                        continue;
+                    }
+
+                    let read_res = {
+                        let buf = &mut self.block_buf[..bs];
+                        usb.bd_read_blocks(lba, 1, buf)
+                    };
+                    match read_res {
+                        Ok(()) => {
+                            log::info!("spi_link: REQ Read seq={} lba={} nblocks={}", seq, arg0, arg1);
+                            self.arm_response_from_block_buf(&req, ESP_OK, bs as u32, bs);
+                        }
+                        Err(e) => {
+                            self.arm_response(&req, e, &[]);
+                        }
+                    }
                 }
 
                 Cmd::Write => {
-                    // later: write blocks to UsbMassStorage
-                    log::info!("spi_link: REQ Write seq={} lba={} nblocks={}", seq, arg0, arg1);
-                    self.arm_response(&req, ESP_ERR_NOT_SUPPORTED, &[]);
-                }
+                    let lba = arg0;
+                    let nblocks_total = arg1;
+
+                    let Some(usb) = get_global_mass_storage() else {
+                    self.arm_response(&req, ESP_ERR_INVALID_STATE, &[]);
+                        continue;
+                    };
+
+                    // test: only 1 block for now
+                    if nblocks_total != 1 {
+                        self.arm_response(&req, ESP_ERR_NOT_SUPPORTED, &[]);
+                            continue;
+                    }
+                    if chunk_idx != 0 {
+                        self.arm_response(&req, ESP_ERR_INVALID_ARG, &[]);
+                        continue;
+                    }
+
+                    Self::ensure_capacity_known(usb);
+                    let bs = usb.block_size as usize;
+                    if bs == 0 {
+                        self.arm_response(&req, ESP_ERR_INVALID_STATE, &[]);
+                        continue;
+                    }
+                    if bs > MAX_PAYLOAD {
+                        self.arm_response(&req, ESP_ERR_INVALID_SIZE, &[]);
+                        continue;
+                    }
+
+                    // payload is right after header
+                    let payload_off = HDR_LEN;
+                    let payload_end = payload_off + bs;
+                    if payload_end > RX_LEN {
+                        self.arm_response(&req, ESP_ERR_INVALID_SIZE, &[]);
+                        continue;
+                    }
+
+                    let data = &rx[payload_off..payload_end];
+
+                    match usb.bd_write_blocks(lba, 1, data) {
+                        Ok(()) => {
+                            log::info!("spi_link: REQ Write seq={} lba={} nblocks={}", seq, lba, nblocks_total);
+                            // arg1 = bytes written (useful now; required later for chunking)
+                            self.arm_response_with_arg1(&req, ESP_OK, bs as u32, &[]);
+                        }
+                        Err(e) => {
+                            log::error!(
+                                "spi_link: Write failed err={} seq={} lba={} nblocks={}",
+                                e,
+                                seq,
+                                lba,
+                                nblocks_total
+                            );
+                            self.arm_response(&req, e, &[]);
+                        }
+    }
+}
+
 
                 Cmd::Flush => {
                     log::info!("spi_link: REQ Flush seq={}", seq);
