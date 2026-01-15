@@ -4,8 +4,8 @@ pub const VERSION: u8 = 1;
 
 pub const RESP_FLAG: u8 = 0x80;
 
-//pub const MAX_PAYLOAD: usize = 512;
-pub const MAX_PAYLOAD: usize = 16; // au lieu de 512
+pub const MAX_PAYLOAD: usize = 512;
+//pub const MAX_PAYLOAD: usize = 16; // au lieu de 512
 
 
 // Payload conventions:

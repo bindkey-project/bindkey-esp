@@ -4,6 +4,66 @@ use esp_idf_sys::*;
 use super::pins::*;
 use super::protocol::*;
 
+struct DmaBuf{
+    ptr: *mut u8,
+    len: usize
+}
+
+impl DmaBuf{
+    fn new(len: usize) -> Self{
+        unsafe{
+            let p = heap_caps_malloc(len, (MALLOC_CAP_DMA | MALLOC_CAP_8BIT) as u32) as *mut u8;
+            if p.is_null(){
+                panic!("heap_caps_malloc(DMA) failed for {} bytes", len);
+            }
+            core::ptr::write_bytes(p, 0u8, len);
+            Self{
+                ptr: p,
+                len: len
+            }
+        }
+    }
+
+    #[inline]
+    fn as_ptr(&self) -> *const u8{
+        self.ptr as *const u8
+    }
+
+    #[inline]
+    fn as_mut_ptr(&mut self) -> *mut u8{
+        self.ptr
+    }
+
+    #[inline]
+    fn as_slice(&self) -> &[u8]{
+        unsafe{
+            core::slice::from_raw_parts(self.ptr as *const u8, self.len)
+        }
+    }
+
+    #[inline]
+    fn as_mut_slice(&mut self) -> &mut [u8]{
+        unsafe{
+            core::slice::from_raw_parts_mut(self.ptr, self.len)
+        }
+    }
+
+    #[inline]
+    fn clear(&mut self){
+        unsafe{
+            core::ptr::write_bytes(self.ptr, 0u8, self.len)
+        }
+    }
+}
+
+impl Drop for DmaBuf{
+    fn drop(&mut self){
+        unsafe{
+            heap_caps_free(self.ptr as *mut core::ffi::c_void);
+        }
+    }
+}
+
 pub struct SpiLink{
     inited: bool,
     //2-phase storage
@@ -38,7 +98,7 @@ impl SpiLink {
             buscfg.data5_io_num = -1;
             buscfg.data6_io_num = -1;
             buscfg.data7_io_num = -1;
-            buscfg.max_transfer_sz = (core::mem::size_of::<Header>() + MAX_PAYLOAD) as i32; // 528
+            buscfg.max_transfer_sz = (core::mem::size_of::<Header>() + MAX_PAYLOAD) as i32; // 528 bytes
 
 
             let mut slvcfg: spi_slave_interface_config_t = core::mem::zeroed();
@@ -46,11 +106,13 @@ impl SpiLink {
             slvcfg.queue_size = 1;
             slvcfg.mode = 0;
 
+            let dma_chan = spi_common_dma_t_SPI_DMA_CH_AUTO;
+
             let err = spi_slave_initialize(
                 spi_host_device_t_SPI3_HOST,
                 &buscfg,
                 &slvcfg,
-                0,
+                dma_chan,
             );
 
             if err != ESP_OK {
@@ -107,23 +169,25 @@ impl SpiLink {
         assert!(self.inited);
 
         const RX_LEN: usize = core::mem::size_of::<Header>() + MAX_PAYLOAD;
-        const TX_LEN: usize = RX_LEN;
 
-        let mut rx = [0u8; RX_LEN];
-        let zeros = [0u8; TX_LEN];
+        let mut rx_dma = DmaBuf::new(RX_LEN);
+        let mut tx_dma = DmaBuf::new(RX_LEN);
 
         loop{
-            let tx_ptr: *const core::ffi::c_void = if self.resp_ready{
-                self.resp_buf.as_ptr() as *const _
+            tx_dma.clear();
+
+            if self.resp_ready{
+                let n = core::cmp::min(self.resp_len, RX_LEN);
+                tx_dma.as_mut_slice()[..n].copy_from_slice(&self.resp_buf[..n]);
             }
             else{
-                zeros.as_ptr() as *const _
-            };
+
+            }
 
             let mut t: spi_slave_transaction_t = unsafe { core::mem::zeroed() };
             t.length = RX_LEN * 8;
-            t.rx_buffer = rx.as_mut_ptr() as *mut _;
-            t.tx_buffer = tx_ptr;
+            t.rx_buffer = rx_dma.as_mut_ptr() as *mut _;
+            t.tx_buffer = tx_dma.as_ptr() as *const _;
             t.user = ptr::null_mut();
 
             unsafe{
@@ -145,7 +209,11 @@ impl SpiLink {
                 continue;
             }
 
-            let req = unsafe{ core::ptr::read_unaligned(rx.as_ptr() as *const Header) };
+            let rx = rx_dma.as_slice();
+            let req = unsafe{
+                core::ptr::read_unaligned(rx.as_ptr() as *const Header)
+            };
+            
             if !req.is_valid(){
                 log::warn!("spi_link: invalid header");
                 log::info!(
