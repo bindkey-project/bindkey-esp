@@ -1,6 +1,9 @@
 mod usb_mass_storage;
+mod spi_link;
 
 use crate::usb_mass_storage::*;
+use crate::spi_link::*;
+
 fn main() {
     // It is necessary to call this function once. Otherwise, some patches to the runtime
     // implemented by esp-idf-sys might not link properly. See https://github.com/esp-rs/esp-idf-template/issues/71
@@ -22,11 +25,20 @@ fn main() {
 
     log::info!("USB Host initialized.");
 
-
-    loop{
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        usb.poll();
-
-        std::thread::sleep(std::time::Duration::from_millis(100));
+    //uniquement test
+    let mut spi = SpiLink::new();
+    if let Err(e) = SpiLink::init(&mut spi){
+        log::error!("SPI init failed: {}", e);
+        return;
     }
+
+    log::info!("SPI Link Slave initialized.");
+    spi.run();
+
+    /*loop{
+        //usb.poll();
+       
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }*/
 }

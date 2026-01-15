@@ -13,6 +13,8 @@ use esp_idf_sys::usb_msc::{
     msc_host_vfs_handle_t,
     msc_host_vfs_register,
     msc_host_vfs_unregister,
+    msc_host_device_info_t,
+    msc_host_get_device_info
 };
 
 use esp_idf_svc::sys::esp_err_to_name;
@@ -31,16 +33,19 @@ const DEBUG_VFS: i32 = 0;
 /// struct to define the usb mass storage device with its handlers and address
 pub struct UsbMassStorage{
     /// USB address of the device
-    pending_addr: i32,   
+    pub(crate) pending_addr: i32,   
 
     /// number of retries left in case of an error occuring
-    retries_left: i32, 
+    pub(crate) retries_left: i32, 
 
     /// handle to the currently opened MSC device                                                                         
-    handle: msc_host_device_handle_t,             
+    pub(crate) handle: msc_host_device_handle_t,             
 
     /// handle to the mounted VFS instance                                              
-    vfs: msc_host_vfs_handle_t,                                                                
+    pub(crate) vfs: msc_host_vfs_handle_t,  
+
+    pub(crate) block_size: u32,
+    pub(crate) block_count: u32,                                                              
 }
 
 impl UsbMassStorage{
@@ -51,6 +56,8 @@ impl UsbMassStorage{
             retries_left: 0,
             handle: core::ptr::null_mut(),
             vfs: core::ptr::null_mut(),
+            block_size: 0,
+            block_count: 0,
         }
     }
 
@@ -122,6 +129,10 @@ impl UsbMassStorage{
                 // reset device handle and vfs pointer  
                 self.handle = core::ptr::null_mut();
                 self.vfs = core::ptr::null_mut();
+
+                // reset block parameters
+                self.block_size = 0;
+                self.block_count = 0;
             }
 
             // the usb mass storage device has been disconnected   
@@ -137,6 +148,11 @@ impl UsbMassStorage{
                 // reset internal state
                 self.pending_addr = -1;
                 self.retries_left = 0;
+
+                // reset block parameters
+                self.block_size = 0;
+                self.block_count = 0;
+
             }
 
             other => {
@@ -184,6 +200,20 @@ impl UsbMassStorage{
             self.handle = handle;
             self.pending_addr = -1;
             self.retries_left = 0;
+
+            let mut info: msc_host_device_info_t = unsafe { core::mem::zeroed() };
+            let e = unsafe { msc_host_get_device_info(handle, &mut info) };
+            if e == ESP_OK {
+                self.block_size = info.sector_size;
+                self.block_count = info.sector_count;
+                log::info!("MSC capacity: blocks={} block_size={}", self.block_count, self.block_size);
+
+                
+            }
+            else{
+                log::warn!("msc_host_get_device_info failed: {}", e);
+            }
+
             if DEBUG_VFS == 1{
                 if !self.mount_vfs(){
                     self.close_device();
