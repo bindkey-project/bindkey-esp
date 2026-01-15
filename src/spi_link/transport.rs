@@ -391,38 +391,29 @@ impl SpiLink {
                 }
 
                 Cmd::Write => {
-                    let lba = arg0;
+                    let lba_start = arg0;
                     let nblocks_total = arg1;
+                    let chunk_idx = req.reserved;
 
                     let Some(usb) = get_global_mass_storage() else {
                     self.arm_response(&req, ESP_ERR_INVALID_STATE, &[]);
                         continue;
                     };
 
-                    // test: only 1 block for now
-                    if nblocks_total != 1 {
-                        self.arm_response(&req, ESP_ERR_NOT_SUPPORTED, &[]);
-                            continue;
-                    }
-                    if chunk_idx != 0 {
-                        self.arm_response(&req, ESP_ERR_INVALID_ARG, &[]);
-                        continue;
-                    }
-
                     Self::ensure_capacity_known(usb);
-                    let bs = usb.block_size as usize;
-                    if bs == 0 {
-                        self.arm_response(&req, ESP_ERR_INVALID_STATE, &[]);
-                        continue;
-                    }
-                    if bs > MAX_PAYLOAD {
-                        self.arm_response(&req, ESP_ERR_INVALID_SIZE, &[]);
-                        continue;
-                    }
+                    
+                    let (lba_i, nblocks_i, chunk_len) = 
+                        match Self::compute_chunk(usb, lba_start, nblocks_total, chunk_idx){
+                            Ok(v) => v,
+                            Err(e) => {
+                                self.arm_response(&req, e, &[]);
+                                continue;
+                            }
+                        };
 
                     // payload is right after header
                     let payload_off = HDR_LEN;
-                    let payload_end = payload_off + bs;
+                    let payload_end = payload_off + chunk_len;
                     if payload_end > RX_LEN {
                         self.arm_response(&req, ESP_ERR_INVALID_SIZE, &[]);
                         continue;
@@ -430,19 +421,19 @@ impl SpiLink {
 
                     let data = &rx[payload_off..payload_end];
 
-                    match usb.bd_write_blocks(lba, 1, data) {
+                    match usb.bd_write_blocks(lba_i, nblocks_i, data) {
                         Ok(()) => {
-                            log::info!("spi_link: REQ Write seq={} lba={} nblocks={}", seq, lba, nblocks_total);
-                            // arg1 = bytes written (useful now; required later for chunking)
-                            self.arm_response_with_arg1(&req, ESP_OK, bs as u32, &[]);
+                            log::info!(
+                                "spi_link: REQ Write seq={} lba_start={} nblocks_total={} chunk_idx={} -> lba_i={} nblocks_i={} chunk_len={}",
+                                seq, lba_start, nblocks_total, chunk_idx, lba_i, nblocks_i, chunk_len
+                            );
+                            // arg1 = bytes written this chunk
+                            self.arm_response_with_arg1(&req, ESP_OK, chunk_len as u32, &[]);
                         }
                         Err(e) => {
                             log::error!(
-                                "spi_link: Write failed err={} seq={} lba={} nblocks={}",
-                                e,
-                                seq,
-                                lba,
-                                nblocks_total
+                                "spi_link: Write failed err={} seq={} lba_start={} nblocks_total={} chunk_idx={}",
+                                e, seq, lba_start, nblocks_total, chunk_idx
                             );
                             self.arm_response(&req, e, &[]);
                         }
