@@ -76,11 +76,6 @@ pub struct SpiLink{
     resp_len: usize,
     resp_buf: [u8; core::mem::size_of::<Header>() + MAX_PAYLOAD],
 
-    //future for stateless chunking
-    //chunk_idx = req.reserved (u16)
-    //chunk_len returned in resp.arg1
-    //offset_bytes = chunk_idx * MAX_PAYLOAD (rule we’ll enforce later)
-
     block_buf: [u8; MAX_PAYLOAD]
 }
 
@@ -140,6 +135,7 @@ impl SpiLink {
 
     fn arm_response_with_arg1(&mut self, req: &Header, status: i32, arg1: u32, payload: &[u8]){
         let mut resp_hdr = Header::response_for(req, status);
+        resp_hdr.reserved = req.reserved;
         resp_hdr.arg1 = arg1;
 
         let hdr_bytes = unsafe{
@@ -172,6 +168,7 @@ impl SpiLink {
 
     fn arm_response_from_block_buf(&mut self, req: &Header, status: i32, arg1: u32, len: usize){
         let mut resp_hdr = Header::response_for(req, status);
+        resp_hdr.reserved = req.reserved;
         resp_hdr.arg1 = arg1;
 
         // header
@@ -215,6 +212,43 @@ impl SpiLink {
         if usb.block_size == 0 || usb.block_count == 0{
             let _ = usb.bd_refresh_capacity();
         }
+    }
+
+    fn compute_chunk(usb: &UsbMassStorage, lba_start: u32, nblocks_total: u32, chunk_idx: u16) -> Result<(u32, u32, usize), i32>{
+        let bs = usb.block_size as usize;
+        if bs == 0{
+            return Err(ESP_ERR_INVALID_STATE);
+        }
+        if bs > MAX_PAYLOAD{
+            return Err(ESP_ERR_INVALID_SIZE);
+        }
+        if(MAX_PAYLOAD % bs) != 0{
+            return Err(ESP_ERR_INVALID_STATE);
+        }
+
+        let total_bytes = (nblocks_total as usize).checked_mul(bs).ok_or(ESP_ERR_INVALID_SIZE)?;
+        let offset_bytes = (chunk_idx as usize).checked_mul(MAX_PAYLOAD).ok_or(ESP_ERR_INVALID_SIZE)?;
+        if offset_bytes >= total_bytes{
+            return Err(ESP_ERR_INVALID_ARG);
+        }
+
+        let chunk_len = core::cmp::min(MAX_PAYLOAD, total_bytes - offset_bytes);
+        if (chunk_len % bs) != 0{
+            return Err(ESP_ERR_INVALID_SIZE);
+        }
+
+        let lba_i = lba_start + (offset_bytes / bs) as u32;
+        let nblocks_i = (chunk_len / bs) as u32;
+
+        let bc = usb.block_count;
+        if bc == 0{
+            return Err(ESP_ERR_INVALID_STATE);
+        }
+        if lba_i.checked_add(nblocks_i).is_none() || (lba_i + nblocks_i) > bc{
+            return Err(ESP_ERR_INVALID_ARG);
+        }
+
+        Ok((lba_i, nblocks_i, chunk_len))
     }
 
     pub fn run(&mut self) -> ! {
@@ -319,43 +353,36 @@ impl SpiLink {
                 }
 
                 Cmd::Read => {
-                    let lba = arg0;
+                    let lba_start = arg0;
                     let nblocks_total = arg1;
+                    let chunk_idx = req.reserved;
 
                     let Some(usb) = get_global_mass_storage() else{
                         self.arm_response(&req, ESP_ERR_INVALID_STATE, &[]);
                         continue;
                     };
 
-                    //test
-                    if nblocks_total != 1{
-                        self.arm_response(&req, ESP_ERR_NOT_SUPPORTED, &[]);
-                        continue;
-                    }
-                    if chunk_idx != 0 {
-                        self.arm_response(&req, ESP_ERR_INVALID_ARG, &[]);
-                        continue;
-                    }
-
                     Self::ensure_capacity_known(usb);
-                    let bs = usb.block_size as usize;
-                    if bs == 0{
-                        self.arm_response(&req, ESP_ERR_INVALID_STATE, &[]);
-                        continue;
-                    }
-                    if bs > MAX_PAYLOAD{
-                        self.arm_response(&req, ESP_ERR_INVALID_SIZE, &[]);
-                        continue;
-                    }
+
+                    let (lba_i, nblocks_i, chunk_len) = {
+                        match Self::compute_chunk(usb, lba_start, nblocks_total, chunk_idx){
+                            Ok(v) => v,
+                            Err(e) => {
+                                self.arm_response(&req, e, &[]);
+                                continue;
+                            }
+                        }
+                    };
 
                     let read_res = {
-                        let buf = &mut self.block_buf[..bs];
-                        usb.bd_read_blocks(lba, 1, buf)
+                        let buf = &mut self.block_buf[..chunk_len];
+                        usb.bd_read_blocks(lba_i, nblocks_i, buf)
                     };
-                    match read_res {
+
+                    match read_res{
                         Ok(()) => {
-                            log::info!("spi_link: REQ Read seq={} lba={} nblocks={}", seq, arg0, arg1);
-                            self.arm_response_from_block_buf(&req, ESP_OK, bs as u32, bs);
+                            log::info!("spi_link: REQ Read seq={} lba_start={} nblocks_total={} chunk_idx={} -> lba_i={} nblocks_i={} chunk_len={}", seq, lba_start, nblocks_total, chunk_idx, lba_i, nblocks_i, chunk_len);
+                            self.arm_response_from_block_buf(&req, ESP_OK, chunk_len as u32, chunk_len);
                         }
                         Err(e) => {
                             self.arm_response(&req, e, &[]);
@@ -419,8 +446,8 @@ impl SpiLink {
                             );
                             self.arm_response(&req, e, &[]);
                         }
-    }
-}
+                    }
+                }
 
 
                 Cmd::Flush => {
