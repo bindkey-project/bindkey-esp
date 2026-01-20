@@ -4,8 +4,7 @@ pub const VERSION: u8 = 1;
 
 pub const RESP_FLAG: u8 = 0x80;
 
-pub const MAX_PAYLOAD: usize = 512;
-//pub const MAX_PAYLOAD: usize = 16; // au lieu de 512
+pub const MAX_PAYLOAD: usize = 4096; //512 test ok => 4096
 
 
 // Payload conventions:
@@ -58,7 +57,7 @@ pub struct Header{ //16 bytes header
     pub version: u8, //protocol version
     pub cmd: u8, //which action asked and req/resp?
     pub seq: u16, //associate response to its request
-    pub reserved: u16, //always 0 might be used later
+    pub reserved: u16, //chunk_idx (0,1,2,...) for multi-block chunking
     pub arg0: u32, //1st generic parameter (ex: lba, status...)
     pub arg1: u32, //2st generic parameter (ex: nblocks, block_count, flags...)
 }

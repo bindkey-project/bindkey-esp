@@ -79,7 +79,7 @@ pub struct SpiLink{
     block_buf: [u8; MAX_PAYLOAD]
 }
 
-impl SpiLink {
+impl SpiLink{
     pub fn new() -> Self{
         Self{
             inited: false,
@@ -251,7 +251,7 @@ impl SpiLink {
         Ok((lba_i, nblocks_i, chunk_len))
     }
 
-    pub fn run(&mut self) -> ! {
+    pub fn run(&mut self) -> !{
         assert!(self.inited);
 
         let mut rx_dma = DmaBuf::new(RX_LEN);
@@ -268,7 +268,7 @@ impl SpiLink {
 
             }
 
-            let mut t: spi_slave_transaction_t = unsafe { core::mem::zeroed() };
+            let mut t: spi_slave_transaction_t = unsafe{core::mem::zeroed()};
             t.length = RX_LEN * 8;
             t.rx_buffer = rx_dma.as_mut_ptr() as *mut _;
             t.tx_buffer = tx_dma.as_ptr() as *const _;
@@ -281,7 +281,7 @@ impl SpiLink {
                     TickType_t::MAX,
                 );
 
-                if err != ESP_OK {
+                if err != ESP_OK{
                     log::error!("spi_slave_transmit err={}", err);
                     std::thread::sleep(std::time::Duration::from_millis(10));
                     continue;
@@ -374,10 +374,13 @@ impl SpiLink {
                         }
                     };
 
+                    let t0 = unsafe{esp_timer_get_time() as i64};
                     let read_res = {
                         let buf = &mut self.block_buf[..chunk_len];
                         usb.bd_read_blocks(lba_i, nblocks_i, buf)
                     };
+                    let t1 = unsafe{esp_timer_get_time() as i64};
+                    log::info!("HOST_IO: READ lba_i={} nblocks_i={} bytes={} dt_us={}", lba_i, nblocks_i, chunk_len, (t1 - t0));
 
                     match read_res{
                         Ok(()) => {
@@ -421,8 +424,16 @@ impl SpiLink {
 
                     let data = &rx[payload_off..payload_end];
 
-                    match usb.bd_write_blocks(lba_i, nblocks_i, data) {
+                    let t0 = unsafe{esp_timer_get_time() as i64};
+                    let write_res = usb.bd_write_blocks(lba_i, nblocks_i, data);
+                    let t1 = unsafe{esp_timer_get_time() as i64};
+                    let dt_us = (t1 - t0) as i64;
+
+                    match write_res{
                         Ok(()) => {
+                            //log I/O
+                            log::info!("HOST_IO: WRITE lba_i={} nblocks_i={} bytes={} dt_us={}", lba_i, nblocks_i, chunk_len, dt_us);
+
                             log::info!(
                                 "spi_link: REQ Write seq={} lba_start={} nblocks_total={} chunk_idx={} -> lba_i={} nblocks_i={} chunk_len={}",
                                 seq, lba_start, nblocks_total, chunk_idx, lba_i, nblocks_i, chunk_len
