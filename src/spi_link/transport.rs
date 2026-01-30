@@ -158,7 +158,7 @@ impl SpiLink{
         }
 
         self.resp_ready = true;
-        log::info!("spi_link: armed response len={}, arg1={}", self.resp_len, arg1);
+        //log::info!("spi_link: armed response len={}, arg1={}", self.resp_len, arg1);
 
         unsafe{
             gpio_set_level(PIN_READY as gpio_num_t, 1);
@@ -188,7 +188,7 @@ impl SpiLink{
         }
 
         self.resp_ready = true;
-        log::info!("spi_link: armed response len={}, arg1={}", self.resp_len, arg1);
+        //log::info!("spi_link: armed response len={}, arg1={}", self.resp_len, arg1);
         unsafe{ 
             gpio_set_level(PIN_READY as gpio_num_t, 1);
         }
@@ -313,7 +313,7 @@ impl SpiLink{
             let arg0 = req.arg0;
             let arg1 = req.arg1;
             let chunk_idx = req.reserved;
-            log::info!("spi_link: cmd={:?} seq={} arg0={} arg1={} chunk_idx={}", cmd, seq, arg0, arg1, chunk_idx);
+            //log::info!("spi_link: cmd={:?} seq={} arg0={} arg1={} chunk_idx={}", cmd, seq, arg0, arg1, chunk_idx);
 
             match cmd {
                 Cmd::GetStatus => {
@@ -329,7 +329,7 @@ impl SpiLink{
                     else{
                         [0u8]
                     };
-                    log::info!("spi_link: REQ GetStatus seq={}", seq);
+                    //log::info!("spi_link: REQ GetStatus seq={}", seq);
                     self.arm_response(&req, ESP_OK, &payload);
                 }
 
@@ -343,7 +343,7 @@ impl SpiLink{
                     match usb.bd_refresh_capacity(){
                         Ok((bs, bc)) => {
                             let capacity = payload::encode_capacity(bs, bc);
-                            log::info!("spi_link: REQ GetCapacity seq={}", seq);
+                            //log::info!("spi_link: REQ GetCapacity seq={}", seq);
                             self.arm_response_with_arg1(&req, ESP_OK, capacity.len() as u32, &capacity);
                         }
                         Err(e) => {
@@ -380,11 +380,11 @@ impl SpiLink{
                         usb.bd_read_blocks(lba_i, nblocks_i, buf)
                     };
                     let t1 = unsafe{esp_timer_get_time() as i64};
-                    log::info!("HOST_IO: READ lba_i={} nblocks_i={} bytes={} dt_us={}", lba_i, nblocks_i, chunk_len, (t1 - t0));
+                    //log::info!("HOST_IO: READ lba_i={} nblocks_i={} bytes={} dt_us={}", lba_i, nblocks_i, chunk_len, (t1 - t0));
 
                     match read_res{
                         Ok(()) => {
-                            log::info!("spi_link: REQ Read seq={} lba_start={} nblocks_total={} chunk_idx={} -> lba_i={} nblocks_i={} chunk_len={}", seq, lba_start, nblocks_total, chunk_idx, lba_i, nblocks_i, chunk_len);
+                            //log::info!("spi_link: REQ Read seq={} lba_start={} nblocks_total={} chunk_idx={} -> lba_i={} nblocks_i={} chunk_len={}", seq, lba_start, nblocks_total, chunk_idx, lba_i, nblocks_i, chunk_len);
                             self.arm_response_from_block_buf(&req, ESP_OK, chunk_len as u32, chunk_len);
                         }
                         Err(e) => {
@@ -432,12 +432,12 @@ impl SpiLink{
                     match write_res{
                         Ok(()) => {
                             //log I/O
-                            log::info!("HOST_IO: WRITE lba_i={} nblocks_i={} bytes={} dt_us={}", lba_i, nblocks_i, chunk_len, dt_us);
+                            //log::info!("HOST_IO: WRITE lba_i={} nblocks_i={} bytes={} dt_us={}", lba_i, nblocks_i, chunk_len, dt_us);
 
-                            log::info!(
-                                "spi_link: REQ Write seq={} lba_start={} nblocks_total={} chunk_idx={} -> lba_i={} nblocks_i={} chunk_len={}",
-                                seq, lba_start, nblocks_total, chunk_idx, lba_i, nblocks_i, chunk_len
-                            );
+                            //log::info!(
+                            //    "spi_link: REQ Write seq={} lba_start={} nblocks_total={} chunk_idx={} -> lba_i={} nblocks_i={} chunk_len={}",
+                            //    seq, lba_start, nblocks_total, chunk_idx, lba_i, nblocks_i, chunk_len
+                            //);
                             // arg1 = bytes written this chunk
                             self.arm_response_with_arg1(&req, ESP_OK, chunk_len as u32, &[]);
                         }
@@ -453,7 +453,7 @@ impl SpiLink{
 
 
                 Cmd::Flush => {
-                    log::info!("spi_link: REQ Flush seq={}", seq);
+                    //log::info!("spi_link: REQ Flush seq={}", seq);
                     self.arm_response(&req, ESP_OK, &[]);
                 }
             }
