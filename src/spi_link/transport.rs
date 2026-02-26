@@ -7,6 +7,37 @@ use crate::usb_mass_storage::UsbMassStorage;
 use crate::usb_mass_storage::block_device::*;
 use crate::usb_mass_storage::get_global_mass_storage;
 
+#[derive(Default)]
+struct PerfSlave {
+    read_ops: u64,
+    write_ops: u64,
+    read_usb_us: u64,
+    write_usb_us: u64,
+    read_total_us: u64,
+    write_total_us: u64
+}
+
+impl PerfSlave {
+    fn log_if_needed(&self){
+        let n = self.read_ops + self.write_ops;
+        if n == 0 || (n % 1024) != 0 { return; }
+
+        let r_avg_total = if self.read_ops > 0 { (self.read_total_us / self.read_ops) as u32 } else { 0 };
+        let r_avg_usb   = if self.read_ops > 0 { (self.read_usb_us   / self.read_ops) as u32 } else { 0 };
+
+        let w_avg_total = if self.write_ops > 0 { (self.write_total_us / self.write_ops) as u32 } else { 0 };
+        let w_avg_usb   = if self.write_ops > 0 { (self.write_usb_us   / self.write_ops) as u32 } else { 0 };
+
+        log::info!(
+            "SLAVE PROF: R ops={} total_us={} usb_us={} | W ops={} total_us={} usb_us={}",
+            self.read_ops, r_avg_total, r_avg_usb,
+            self.write_ops, w_avg_total, w_avg_usb
+        );
+    }
+}
+
+
+
 struct DmaBuf{
     ptr: *mut u8,
     len: usize
@@ -76,7 +107,10 @@ pub struct SpiLink{
     resp_len: usize,
     resp_buf: [u8; core::mem::size_of::<Header>() + MAX_PAYLOAD],
 
-    block_buf: [u8; MAX_PAYLOAD]
+    block_buf: [u8; MAX_PAYLOAD],
+
+    perf: PerfSlave,
+    last_req_done_us: i64
 }
 
 impl SpiLink{
@@ -87,6 +121,8 @@ impl SpiLink{
             resp_len: 0,
             resp_buf: [0u8; RX_LEN],
             block_buf: [0u8; MAX_PAYLOAD],
+            perf: PerfSlave::default(),
+            last_req_done_us: 0
         }
     }
 
@@ -258,7 +294,7 @@ impl SpiLink{
         let mut tx_dma = DmaBuf::new(RX_LEN);
 
         loop{
-            tx_dma.clear();
+            //tx_dma.clear();
 
             if self.resp_ready{
                 let n = core::cmp::min(self.resp_len, RX_LEN);
@@ -353,6 +389,8 @@ impl SpiLink{
                 }
 
                 Cmd::Read => {
+                    let t_total0 = unsafe{esp_timer_get_time() as i64};
+
                     let lba_start = arg0;
                     let nblocks_total = arg1;
                     let chunk_idx = req.reserved;
@@ -374,13 +412,23 @@ impl SpiLink{
                         }
                     };
 
-                    let t0 = unsafe{esp_timer_get_time() as i64};
+                    let t_usb0 = unsafe{esp_timer_get_time() as i64};
                     let read_res = {
                         let buf = &mut self.block_buf[..chunk_len];
                         usb.bd_read_blocks(lba_i, nblocks_i, buf)
                     };
-                    let t1 = unsafe{esp_timer_get_time() as i64};
+                    let t_usb1 = unsafe{esp_timer_get_time() as i64};
+
+                    let t_total1 = unsafe{esp_timer_get_time() as i64};
                     //log::info!("HOST_IO: READ lba_i={} nblocks_i={} bytes={} dt_us={}", lba_i, nblocks_i, chunk_len, (t1 - t0));
+                    let usb_dt = (t_usb1 - t_usb0) as u64;
+                    let total_dt = (t_total1 - t_total0) as u64;
+
+                    self.perf.read_ops += 1;
+                    self.perf.read_usb_us += usb_dt;
+                    self.perf.read_total_us += total_dt;
+                    self.perf.log_if_needed();
+
 
                     match read_res{
                         Ok(()) => {
@@ -394,6 +442,8 @@ impl SpiLink{
                 }
 
                 Cmd::Write => {
+                    let t_total0 = unsafe{esp_timer_get_time() as i64};
+
                     let lba_start = arg0;
                     let nblocks_total = arg1;
                     let chunk_idx = req.reserved;
@@ -424,10 +474,20 @@ impl SpiLink{
 
                     let data = &rx[payload_off..payload_end];
 
-                    let t0 = unsafe{esp_timer_get_time() as i64};
+                    let t_usb0 = unsafe{esp_timer_get_time() as i64};
                     let write_res = usb.bd_write_blocks(lba_i, nblocks_i, data);
-                    let t1 = unsafe{esp_timer_get_time() as i64};
-                    let dt_us = (t1 - t0) as i64;
+                    let t_usb1 = unsafe{esp_timer_get_time() as i64};
+
+                    let t_total1 = unsafe { esp_timer_get_time() as i64 };
+
+                    let usb_dt = (t_usb1 - t_usb0) as u64;
+                    let total_dt = (t_total1 - t_total0) as u64;
+
+                    self.perf.write_ops += 1;
+                    self.perf.write_usb_us += usb_dt;
+                    self.perf.write_total_us += total_dt;
+                    self.perf.log_if_needed();
+
 
                     match write_res{
                         Ok(()) => {
