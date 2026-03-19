@@ -311,7 +311,7 @@ impl SpiLink{
         let mut tx_dma = DmaBuf::new(RX_LEN);
 
         loop{
-            tx_dma.clear();
+            
             if !Self::spi_slave_xfer(&mut rx_dma, &tx_dma, HDR_LEN){
                 continue;
             }
@@ -429,6 +429,12 @@ impl SpiLink{
 
                     let Some(usb) = get_global_mass_storage() else {
                         log::error!("spi_link: Write sans USB");
+                        tx_dma.clear();
+                        Self::ready_high();
+                        Self::spi_slave_xfer(&mut rx_dma, &tx_dma, MAX_PAYLOAD);
+                        Self::ready_low();
+                        self.arm_response(&req, ESP_ERR_INVALID_STATE, &[]);
+                        self.send_response(&mut rx_dma, &mut tx_dma);
                         continue;
                     };
                     Self::ensure_capacity_known(usb);
@@ -438,6 +444,12 @@ impl SpiLink{
                             Ok(v) => v,
                             Err(e) => {
                                 log::error!("spi_link: Write compute_chunk err={}", e);
+                                tx_dma.clear();
+                                Self::ready_high();
+                                Self::spi_slave_xfer(&mut rx_dma, &tx_dma, MAX_PAYLOAD);
+                                Self::ready_low();
+                                self.arm_response(&req, e, &[]);
+                                self.send_response(&mut rx_dma, &mut tx_dma);
                                 continue;
                             }
                         };
