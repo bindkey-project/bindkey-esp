@@ -99,12 +99,12 @@ impl Drop for DmaBuf{
 }
 
 const HDR_LEN: usize = core::mem::size_of::<Header>();
-const RX_LEN: usize = HDR_LEN + MAX_PAYLOAD;
+const RX_LEN: usize = HDR_LEN + MAX_PAYLOAD + CRC_LEN;
 pub struct SpiLink{
     inited: bool,
     //2-phase storage
     resp_len: usize,
-    resp_buf: [u8; core::mem::size_of::<Header>() + MAX_PAYLOAD],
+    resp_buf: [u8; HDR_LEN + MAX_PAYLOAD + CRC_LEN],
 
     block_buf: [u8; MAX_PAYLOAD],
 
@@ -206,11 +206,13 @@ impl SpiLink{
         };
         self.resp_buf[..HDR_LEN].copy_from_slice(hdr_bytes);
 
-        // payload from self.block_buf without surviving borrow
+        // payload from self.block_buf + CRC32 trailer
         let pay_len = core::cmp::min(len, MAX_PAYLOAD);
         if pay_len > 0 {
             self.resp_buf[HDR_LEN..HDR_LEN + pay_len].copy_from_slice(&self.block_buf[..pay_len]);
-            self.resp_len = HDR_LEN + pay_len;
+            let crc = spi_crc32(&self.block_buf[..pay_len]);
+            self.resp_buf[HDR_LEN + pay_len..HDR_LEN + pay_len + CRC_LEN].copy_from_slice(&crc.to_le_bytes());
+            self.resp_len = HDR_LEN + pay_len + CRC_LEN;
         }
         else{
             self.resp_len = HDR_LEN;
@@ -237,6 +239,7 @@ impl SpiLink{
         }
     }
 
+    const SPI_XFER_TIMEOUT_TICKS: u32 = u32::MAX;
     fn spi_slave_xfer(rx_dma: &mut DmaBuf, tx_dma: &DmaBuf, nbytes: usize) -> bool{
         let mut t: spi_slave_transaction_t = unsafe{core::mem::zeroed()};
         t.length = nbytes * 8;
@@ -244,8 +247,12 @@ impl SpiLink{
         t.tx_buffer = tx_dma.as_ptr() as *const _;
         t.user = ptr::null_mut();
         let err = unsafe{
-            spi_slave_transmit(spi_host_device_t_SPI3_HOST, &mut t, TickType_t::MAX)
+            spi_slave_transmit(spi_host_device_t_SPI3_HOST, &mut t, Self::SPI_XFER_TIMEOUT_TICKS)
         };
+        if err == ESP_ERR_TIMEOUT{
+            log::warn!("spi_slave_xfer: timeout - resync, retour au header");
+            return false;
+        }
         if err != ESP_OK{
             log::error!("spi_slave_transmit err={}", err);
             return false;
@@ -352,7 +359,7 @@ impl SpiLink{
                     else{
                         [0u8]
                     };
-                    //log::info!("spi_link: REQ GetStatus seq={}", seq);
+                    //log::info!("spi_link: REQ GetStatus payload={}", payload[0]);
                     self.arm_response(&req, ESP_OK, &payload);
                     self.send_response(&mut rx_dma, &mut tx_dma);
                 }
@@ -417,6 +424,7 @@ impl SpiLink{
                             self.arm_response_from_block_buf(&req, ESP_OK, chunk_len as u32, chunk_len);
                         }
                         Err(e) => {
+                            log::error!("spi_link: Read bd_read_blocks err={} lba={} n={}", e, lba_i, nblocks_i);
                             self.arm_response(&req, e, &[]);
                         }
                     }
@@ -431,7 +439,7 @@ impl SpiLink{
                         log::error!("spi_link: Write sans USB");
                         tx_dma.clear();
                         Self::ready_high();
-                        Self::spi_slave_xfer(&mut rx_dma, &tx_dma, MAX_PAYLOAD);
+                        Self::spi_slave_xfer(&mut rx_dma, &tx_dma, MAX_PAYLOAD + CRC_LEN);
                         Self::ready_low();
                         self.arm_response(&req, ESP_ERR_INVALID_STATE, &[]);
                         self.send_response(&mut rx_dma, &mut tx_dma);
@@ -446,7 +454,7 @@ impl SpiLink{
                                 log::error!("spi_link: Write compute_chunk err={}", e);
                                 tx_dma.clear();
                                 Self::ready_high();
-                                Self::spi_slave_xfer(&mut rx_dma, &tx_dma, MAX_PAYLOAD);
+                                Self::spi_slave_xfer(&mut rx_dma, &tx_dma, MAX_PAYLOAD + CRC_LEN);
                                 Self::ready_low();
                                 self.arm_response(&req, e, &[]);
                                 self.send_response(&mut rx_dma, &mut tx_dma);
@@ -456,11 +464,25 @@ impl SpiLink{
 
                     tx_dma.clear();
                     Self::ready_high();
-                    if !Self::spi_slave_xfer(&mut rx_dma, &tx_dma, chunk_len){
+                    if !Self::spi_slave_xfer(&mut rx_dma, &tx_dma, chunk_len + CRC_LEN){
                         Self::ready_low();
                         continue;
                     }
                     Self::ready_low();
+
+                    // verify CRC32 on received write payload
+                    let rx_data = rx_dma.as_slice();
+                    let received_crc = u32::from_le_bytes([
+                        rx_data[chunk_len], rx_data[chunk_len + 1],
+                        rx_data[chunk_len + 2], rx_data[chunk_len + 3],
+                    ]);
+                    let computed_crc = spi_crc32(&rx_data[..chunk_len]);
+                    if received_crc != computed_crc{
+                        log::error!("spi_link: Write CRC mismatch lba={} chunk={} recv=0x{:08x} comp=0x{:08x}", lba_i, chunk_idx, received_crc, computed_crc);
+                        self.arm_response(&req, ESP_ERR_INVALID_CRC, &[]);
+                        self.send_response(&mut rx_dma, &mut tx_dma);
+                        continue;
+                    }
 
                     let t_usb0 = unsafe{esp_timer_get_time() as i64};
                     let write_res = usb.bd_write_blocks(lba_i, nblocks_i, &rx_dma.as_slice()[..chunk_len]);

@@ -13,8 +13,6 @@ use esp_idf_sys::usb_msc::{
     msc_host_vfs_handle_t,
     msc_host_vfs_register,
     msc_host_vfs_unregister,
-    msc_host_device_info_t,
-    msc_host_get_device_info
 };
 
 use esp_idf_svc::sys::esp_err_to_name;
@@ -201,18 +199,10 @@ impl UsbMassStorage{
             self.pending_addr = -1;
             self.retries_left = 0;
 
-            let mut info: msc_host_device_info_t = unsafe { core::mem::zeroed() };
-            let e = unsafe { msc_host_get_device_info(handle, &mut info) };
-            if e == ESP_OK {
-                self.block_size = info.sector_size;
-                self.block_count = info.sector_count;
-                log::info!("MSC capacity: blocks={} block_size={}", self.block_count, self.block_size);
-
-                
-            }
-            else{
-                log::warn!("msc_host_get_device_info failed: {}", e);
-            }
+            match self.bd_refresh_capacity(){
+                Ok((bs, bc)) => log::info!("MSC capacity: blocks={} block_size={}", bc, bs),                                                                                                                                              
+                Err(e) => log::warn!("bd_refresh_capacity failed: {}", e),                                                                                                                                                                
+            }  
 
             if DEBUG_VFS == 1{
                 if !self.mount_vfs(){
@@ -227,7 +217,7 @@ impl UsbMassStorage{
         }
         else{
             log::error!("Fatal MSC error -> abort retries");
-            self.pending_addr -= 1;
+            self.pending_addr = -1;
             self.retries_left = 0;
         }
     }
