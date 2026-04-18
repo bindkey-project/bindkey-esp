@@ -150,12 +150,14 @@ impl SpiLink{
 
             let dma_chan = spi_common_dma_t_SPI_DMA_CH_AUTO;
 
+            // attention si on remet le bmlite à changer !
             let err = spi_slave_initialize(
-                spi_host_device_t_SPI3_HOST,
+                spi_host_device_t_SPI2_HOST,
                 &buscfg,
                 &slvcfg,
                 dma_chan,
             );
+            //log::info!("spi_slave_initialize ret={}", err);
 
             if err != ESP_OK {
                 return Err(err);
@@ -247,7 +249,7 @@ impl SpiLink{
         t.tx_buffer = tx_dma.as_ptr() as *const _;
         t.user = ptr::null_mut();
         let err = unsafe{
-            spi_slave_transmit(spi_host_device_t_SPI3_HOST, &mut t, Self::SPI_XFER_TIMEOUT_TICKS)
+            spi_slave_transmit(spi_host_device_t_SPI2_HOST, &mut t, Self::SPI_XFER_TIMEOUT_TICKS)
         };
         if err == ESP_ERR_TIMEOUT{
             log::warn!("spi_slave_xfer: timeout - resync, retour au header");
@@ -329,6 +331,8 @@ impl SpiLink{
 
             if !req.is_valid(){
                 log::warn!("spi_link: invalid header");
+                //log::warn!("spi_link: invalid header bytes: {:02x} {:02x} {:02x}",
+                //    rx_dma.as_slice()[0], rx_dma.as_slice()[1], rx_dma.as_slice()[2]);
                 continue;
             }
 

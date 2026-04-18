@@ -1,9 +1,13 @@
 mod usb_mass_storage;
 mod spi_link;
+mod led;
+mod power_switch;
 
 use crate::usb_mass_storage::*;
 use crate::spi_link::*;
 use crate::task::start_spi_task;
+use crate::led::*;
+use crate::power_switch::*;
 
 fn main() {
     // It is necessary to call this function once. Otherwise, some patches to the runtime
@@ -13,7 +17,9 @@ fn main() {
     // Bind the log crate to the ESP Logging facilities
     esp_idf_svc::log::EspLogger::initialize_default();
 
-    log::info!("Hello, world!");
+    let _led = LedGuard::new();
+
+    let _tps = TPSguard::new();
 
     let mut usb = UsbMassStorage::new();
 
