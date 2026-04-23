@@ -19,6 +19,8 @@ use esp_idf_svc::sys::esp_err_to_name;
 use std::ffi::CString;
 use std::path::Path;
 
+use crate::power_switch::power_cycle_usb;
+
 /// path to mount the usb hard drive with the ESP32
 const MNT_PATH: &str = "/usb";      
 
@@ -43,7 +45,9 @@ pub struct UsbMassStorage{
     pub(crate) vfs: msc_host_vfs_handle_t,  
 
     pub(crate) block_size: u32,
-    pub(crate) block_count: u32,                                                              
+    pub(crate) block_count: u32,  
+
+    pub(crate) no_device_since: Option<std::time::Instant>                                                            
 }
 
 impl UsbMassStorage{
@@ -56,6 +60,7 @@ impl UsbMassStorage{
             vfs: core::ptr::null_mut(),
             block_size: 0,
             block_count: 0,
+            no_device_since: None
         }
     }
 
@@ -172,6 +177,23 @@ impl UsbMassStorage{
 
             // attempt to open the msc device and mount its filesystem
             self.try_open_and_mount();
+
+            if self.handle.is_null() && self.pending_addr < 0{
+                let now = std::time::Instant::now();
+                match self.no_device_since{
+                    None => self.no_device_since = Some(now),
+                    Some(since) => {
+                        if since.elapsed().as_secs() >= 1{
+                            log::warn!("USB watchdog: no device for 1s, power cycling...");
+                            power_cycle_usb();
+                            self.no_device_since = Some(std::time::Instant::now());
+                        }
+                    }
+                }
+            }
+            else{
+                self.no_device_since = None;
+            }
         }
     }
 

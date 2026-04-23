@@ -20,6 +20,7 @@ fn main() {
     let _led = LedGuard::new();
 
     let _tps = TPSguard::new();
+    set_global_tps(&_tps);
 
     let mut usb = UsbMassStorage::new();
 
