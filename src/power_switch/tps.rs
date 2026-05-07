@@ -26,7 +26,7 @@ pub fn power_cycle_usb(){
     if !TPS_INITIALIZED.load(Ordering::Acquire){
         return;
     }
-    log::warn!("USB: power cycling UBS...");
+    log::warn!("USB: power cycling USB...");
     unsafe{
         gpio_set_level(EN_BARRE_GPIO, 1);
     }
