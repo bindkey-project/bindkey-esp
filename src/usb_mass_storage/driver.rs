@@ -183,8 +183,8 @@ impl UsbMassStorage{
                 match self.no_device_since{
                     None => self.no_device_since = Some(now),
                     Some(since) => {
-                        if since.elapsed().as_secs() >= 1{
-                            log::warn!("USB watchdog: no device for 1s, power cycling...");
+                        if since.elapsed().as_secs() >= 2{
+                            log::warn!("USB watchdog: no device for 2s, power cycling...");
                             power_cycle_usb();
                             self.no_device_since = Some(std::time::Instant::now());
                         }

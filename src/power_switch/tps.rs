@@ -30,7 +30,7 @@ pub fn power_cycle_usb(){
     unsafe{
         gpio_set_level(EN_BARRE_GPIO, 1);
     }
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    std::thread::sleep(std::time::Duration::from_secs(2));
     unsafe{
         gpio_set_level(EN_BARRE_GPIO, 0);
     }
