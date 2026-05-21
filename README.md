@@ -1,9 +1,8 @@
 <p align="center">
-  <img src="assets/logo-bindkey.png" alt="Logo BindKey" width="220"/>
+  <img src="assets/logo-bindkey.png" alt="Logo BindKey" width="450"/>
 </p>
 
 <h1 align="center">BindKey</h1>
-<h3 align="center">bindkey-esp — firmware slave</h3>
 
 **BindKey** est un proxy USB chiffré qui se branche entre l'ordinateur et un
 support de stockage externe (clé USB, SSD, lecteur SD). Toutes les données qui
