@@ -1,0 +1,3 @@
+# Vendored third-party Espressif C component (USB Host MSC class driver).
+# Excluded from GitHub Linguist language stats so the repo reflects the Rust firmware.
+src/usb_mass_storage/usb_host_msc/** linguist-vendored
