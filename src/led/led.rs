@@ -4,6 +4,7 @@ const LED_GPIO: i32 = 8;
 
 pub struct LedGuard;
 
+// turning on the LED by default
 impl LedGuard{
     pub fn new() -> Self{
         unsafe{
@@ -15,6 +16,7 @@ impl LedGuard{
     }
 }
 
+// properly turning off the LED
 impl Drop for LedGuard{
     fn drop(&mut self){
         unsafe{

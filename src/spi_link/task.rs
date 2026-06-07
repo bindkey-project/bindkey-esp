@@ -3,8 +3,10 @@ use esp_idf_sys::*;
 
 use crate::spi_link::SpiLink;
 
+// handle to the spawned SPI slave task
 static mut SPI_TASK_HANDLE: TaskHandle_t = core::ptr::null_mut();
 
+// FreeRTOS entry point: casts the arg back to SpiLink and runs its loop
 extern "C" fn spi_task_entry(arg: *mut c_void){
     let spi: &mut SpiLink = unsafe{
         &mut *(arg as *mut SpiLink)
@@ -12,6 +14,7 @@ extern "C" fn spi_task_entry(arg: *mut c_void){
     spi.run();
 }
 
+// spawns the SPI slave task pinned to core 1 (priority 10, 4096-word stack)
 pub fn start_spi_task(spi: &'static mut SpiLink) -> Result<(), i32>{
     unsafe{
         let name = b"spi_link\0";

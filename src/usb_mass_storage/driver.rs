@@ -21,27 +21,27 @@ use std::path::Path;
 
 use crate::power_switch::power_cycle_usb;
 
-/// path to mount the usb hard drive with the ESP32
+// path to mount the usb hard drive with the ESP32
 const MNT_PATH: &str = "/usb";      
 
-/// number of retries if a problem occurs
+// number of retries if a problem occurs
 const RETRY_COUNT: i32 = 3;
 
-/// flag to allow debugging with a vfs mounting
+// flag to allow debugging with a vfs mounting
 const DEBUG_VFS: i32 = 0;
 
-/// struct to define the usb mass storage device with its handlers and address
+// struct to define the usb mass storage device with its handlers and address
 pub struct UsbMassStorage{
-    /// USB address of the device
+    // USB address of the device
     pub(crate) pending_addr: i32,   
 
-    /// number of retries left in case of an error occuring
+    // number of retries left in case of an error occuring
     pub(crate) retries_left: i32, 
 
-    /// handle to the currently opened MSC device                                                                         
+    // handle to the currently opened MSC device                                                                         
     pub(crate) handle: msc_host_device_handle_t,             
 
-    /// handle to the mounted VFS instance                                              
+    // handle to the mounted VFS instance                                              
     pub(crate) vfs: msc_host_vfs_handle_t,  
 
     pub(crate) block_size: u32,
@@ -51,7 +51,7 @@ pub struct UsbMassStorage{
 }
 
 impl UsbMassStorage{
-    /// init of a new mass storage device
+    // init of a new mass storage device
     pub fn new() -> Self{
         UsbMassStorage{
             pending_addr: -1,
@@ -64,7 +64,7 @@ impl UsbMassStorage{
         }
     }
 
-    /// host initialisation, before trying to detect the usb hard drive
+    // host initialisation, before trying to detect the usb hard drive
     pub fn init_host() -> Result<(), i32>{
         std::thread::sleep(std::time::Duration::from_millis(500));
         unsafe{
@@ -110,12 +110,12 @@ impl UsbMassStorage{
         }
     }
 
-    /// function to verify if the device is mounted
+    // function to verify if the device is mounted
     pub fn is_mounted(&self) -> bool{
         !self.vfs.is_null()
     }
 
-    /// handles raw msc events received from the USB Host stack => reacts to device connection, disconnection events and updates the internal state accordingly
+    // handles raw msc events received from the USB Host stack => reacts to device connection, disconnection events and updates the internal state accordingly
     pub fn handle_raw_event(&mut self, event: &msc_host_event_t){
         match event.event{
             // the usb mass storage device has been connected
@@ -164,7 +164,7 @@ impl UsbMassStorage{
         }
     }
 
-    /// function to be called in the main.rs file in order to make the usb mass storage service available
+    // function to be called in the main.rs file in order to make the usb mass storage service available
     pub fn poll(&mut self){
         unsafe{
             let mut flags: u32 = 0;
@@ -197,9 +197,9 @@ impl UsbMassStorage{
         }
     }
 
-    /// attempts to open a MSC device and mount a filesystem
+    // attempts to open a MSC device and mount a filesystem
     fn try_open_and_mount(&mut self){
-        //abort 
+        // abort if there is no pending device or no retries left
         if self.pending_addr < 0 || self.retries_left <= 0 {
             return;
         }
@@ -244,6 +244,7 @@ impl UsbMassStorage{
         }
     }
 
+    // uninstalls the MSC device and clears the handle
     fn close_device(&mut self){
         if !self.handle.is_null(){
             unsafe{msc_host_uninstall_device(self.handle)};
@@ -251,6 +252,7 @@ impl UsbMassStorage{
         }
     }
 
+    // mounts the FAT VFS at MNT_PATH (debug only; lists the contents on success)
     fn mount_vfs(&mut self) -> bool{
         let mount_cfg = esp_vfs_fat_mount_config_t{
             format_if_mount_failed: false,
@@ -286,6 +288,7 @@ impl UsbMassStorage{
         }
     }
 
+    // unmounts the FAT VFS and clears the handle
     fn unmount_vfs(&mut self){
         if !self.vfs.is_null(){
             unsafe{ msc_host_vfs_unregister(self.vfs) };

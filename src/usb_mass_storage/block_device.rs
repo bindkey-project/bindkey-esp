@@ -8,6 +8,7 @@ use esp_idf_sys::usb_msc::{
 
 use crate::usb_mass_storage::driver::UsbMassStorage;
 
+// readiness of the physical block device, as reported to the master over SPI
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockDevStatus {
     NotPresent,
@@ -16,6 +17,7 @@ pub enum BlockDevStatus {
 }
 
 impl UsbMassStorage {
+    // probes the drive: NotPresent (no handle), NotReady (no capacity / unit not ready) or Ready
     pub fn bd_status(&self) -> BlockDevStatus {
         if self.handle.is_null(){
             return BlockDevStatus::NotPresent;
@@ -34,6 +36,7 @@ impl UsbMassStorage {
         }
     }
 
+    // SCSI READ CAPACITY: caches and returns (block_size, block_count)
     pub fn bd_refresh_capacity(&mut self) -> Result<(u32, u32), i32>{
         if self.handle.is_null(){
             return Err(ESP_ERR_INVALID_STATE);
@@ -53,6 +56,7 @@ impl UsbMassStorage {
         Ok((bs, bc))
     }
 
+    // SCSI READ(10): reads nblocks into out (validates handle, range and buffer size)
     pub fn bd_read_blocks(&self, lba: u32, nblocks: u32, out: &mut [u8]) -> Result<(), i32>{
         if self.handle.is_null(){
             return Err(ESP_ERR_INVALID_STATE);
@@ -86,6 +90,7 @@ impl UsbMassStorage {
 
     }
 
+    // SCSI WRITE(10): writes nblocks from data (validates handle, range and buffer size)
     pub fn bd_write_blocks(&self, lba: u32, nblocks: u32, data: &[u8]) -> Result<(), i32>{
         if self.handle.is_null(){
             return Err(ESP_ERR_INVALID_STATE);
@@ -119,7 +124,7 @@ impl UsbMassStorage {
         }
     }
 
-    // à compléter si besoin
+    // no-op flush for now (drive has no explicit sync); to complete if needed
     pub fn bd_flush(&self) -> Result<(), i32> {
         if self.handle.is_null() {
             return Err(ESP_ERR_INVALID_STATE);

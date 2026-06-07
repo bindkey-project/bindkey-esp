@@ -5,7 +5,7 @@ use std::fs::read_dir;
 use crate::usb_mass_storage::UsbMassStorage;
 
 impl UsbMassStorage{
-    /// list all files in the device
+    // list all files in the device
     pub fn ls_all_device(&self, path: &Path) -> io::Result<()>{
         log::info!("Listing: {}", path.display());
 

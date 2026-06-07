@@ -7,6 +7,7 @@ use crate::usb_mass_storage::UsbMassStorage;
 use crate::usb_mass_storage::block_device::*;
 use crate::usb_mass_storage::get_global_mass_storage;
 
+// slave-side profiling counters (read/write op counts + USB timing)
 #[derive(Default)]
 struct PerfSlave {
     read_ops: u64,
@@ -18,6 +19,7 @@ struct PerfSlave {
 }
 
 impl PerfSlave {
+    // logs averaged USB timing every 1024 ops
     fn log_if_needed(&self){
         let n = self.read_ops + self.write_ops;
         if n == 0 || (n % 1024) != 0 { return; }
@@ -38,12 +40,14 @@ impl PerfSlave {
 
 
 
+// DMA-capable buffer in internal RAM (8-bit caps), allocated once
 struct DmaBuf{
     ptr: *mut u8,
     len: usize
 }
 
 impl DmaBuf{
+    // allocates a zeroed DMA-capable buffer (panics on OOM)
     fn new(len: usize) -> Self{
         unsafe{
             let p = heap_caps_malloc(len, (MALLOC_CAP_DMA | MALLOC_CAP_8BIT) as u32) as *mut u8;
@@ -82,6 +86,7 @@ impl DmaBuf{
         }
     }
 
+    // zeroes the whole buffer
     #[inline]
     fn clear(&mut self){
         unsafe{
@@ -98,11 +103,14 @@ impl Drop for DmaBuf{
     }
 }
 
+// header length and full RX frame length (header + payload + CRC)
 const HDR_LEN: usize = core::mem::size_of::<Header>();
 const RX_LEN: usize = HDR_LEN + MAX_PAYLOAD + CRC_LEN;
+
+// SPI slave endpoint: receives commands from the master and drives the real USB drive
 pub struct SpiLink{
     inited: bool,
-    //2-phase storage
+    // 2-phase storage
     resp_len: usize,
     resp_buf: [u8; HDR_LEN + MAX_PAYLOAD + CRC_LEN],
 
@@ -113,6 +121,7 @@ pub struct SpiLink{
 }
 
 impl SpiLink{
+    // builds the link (buffers zeroed, not yet initialized)
     pub fn new() -> Self{
         Self{
             inited: false,
@@ -124,6 +133,7 @@ impl SpiLink{
         }
     }
 
+    // configures the SPI slave (SPI2) and the READY output GPIO; called once at boot
     pub fn init(&mut self) -> Result<(), i32>{
         unsafe{
             gpio_reset_pin(PIN_READY as gpio_num_t);
@@ -140,7 +150,7 @@ impl SpiLink{
             buscfg.data5_io_num = -1;
             buscfg.data6_io_num = -1;
             buscfg.data7_io_num = -1;
-            buscfg.max_transfer_sz = RX_LEN as i32; // 528 bytes
+            buscfg.max_transfer_sz = RX_LEN as i32; // = HDR + MAX_PAYLOAD + CRC
 
 
             let mut slvcfg: spi_slave_interface_config_t = core::mem::zeroed();
@@ -150,7 +160,6 @@ impl SpiLink{
 
             let dma_chan = spi_common_dma_t_SPI_DMA_CH_AUTO;
 
-            // attention si on remet le bmlite à changer !
             let err = spi_slave_initialize(
                 spi_host_device_t_SPI2_HOST,
                 &buscfg,
@@ -169,6 +178,7 @@ impl SpiLink{
         }
     }
 
+    // stages a response (header + inline payload) into resp_buf, carrying arg1
     fn arm_response_with_arg1(&mut self, req: &Header, status: i32, arg1: u32, payload: &[u8]){
         let mut resp_hdr = Header::response_for(req, status);
         resp_hdr.reserved = req.reserved;
@@ -197,6 +207,7 @@ impl SpiLink{
 
     }
 
+    // stages a response with the read payload from block_buf + a CRC32 trailer
     fn arm_response_from_block_buf(&mut self, req: &Header, status: i32, arg1: u32, len: usize){
         let mut resp_hdr = Header::response_for(req, status);
         resp_hdr.reserved = req.reserved;
@@ -222,11 +233,13 @@ impl SpiLink{
     }
 
 
+    // stages a response with an inline payload (arg1 = 0)
     #[inline]
     fn arm_response(&mut self, req: &Header, status: i32, payload: &[u8]){
         self.arm_response_with_arg1(req, status, 0, payload);
     }
 
+    // drives the READY line high (signals the master the slave is ready)
     #[inline]
     fn ready_high(){
         unsafe{
@@ -234,6 +247,7 @@ impl SpiLink{
         }
     }
 
+    // drives the READY line low (slave idle / done)
     #[inline]
     fn ready_low(){
         unsafe{
@@ -242,6 +256,7 @@ impl SpiLink{
     }
 
     const SPI_XFER_TIMEOUT_TICKS: u32 = u32::MAX;
+    // runs one SPI slave transfer of nbytes; returns false on timeout/error
     fn spi_slave_xfer(rx_dma: &mut DmaBuf, tx_dma: &DmaBuf, nbytes: usize) -> bool{
         let mut t: spi_slave_transaction_t = unsafe{core::mem::zeroed()};
         t.length = nbytes * 8;
@@ -262,6 +277,7 @@ impl SpiLink{
         true
     }
 
+    // copies the staged response into the TX DMA buffer and clocks it out (READY high → low)
     fn send_response(&mut self, rx_dma: &mut DmaBuf, tx_dma: &mut DmaBuf){
         let n = self.resp_len;
         tx_dma.as_mut_slice()[..n].copy_from_slice(&self.resp_buf[..n]);
@@ -270,12 +286,14 @@ impl SpiLink{
         Self::ready_low();
     }
 
+    // refreshes the USB capacity (block size/count) if not known yet
     fn ensure_capacity_known(usb: &mut UsbMassStorage){
         if usb.block_size == 0 || usb.block_count == 0{
             let _ = usb.bd_refresh_capacity();
         }
     }
 
+    // maps (lba_start, nblocks_total, chunk_idx) to this chunk's (lba, nblocks, byte length), with bounds checks
     fn compute_chunk(usb: &UsbMassStorage, lba_start: u32, nblocks_total: u32, chunk_idx: u16) -> Result<(u32, u32, usize), i32>{
         let bs = usb.block_size as usize;
         if bs == 0{
@@ -313,6 +331,7 @@ impl SpiLink{
         Ok((lba_i, nblocks_i, chunk_len))
     }
 
+    // main slave loop: read a header, dispatch the command, send the response (never returns)
     pub fn run(&mut self) -> !{
         assert!(self.inited);
 

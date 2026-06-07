@@ -9,12 +9,13 @@ use crate::task::start_spi_task;
 use crate::led::*;
 use crate::power_switch::*;
 
+// boot sequence: LED → TPS power switch → USB host → SPI slave task, then poll the USB host forever
 fn main() {
-    // It is necessary to call this function once. Otherwise, some patches to the runtime
-    // implemented by esp-idf-sys might not link properly. See https://github.com/esp-rs/esp-idf-template/issues/71
+    // it is necessary to call this function once. Otherwise, some patches to the runtime
+    // implemented by esp-idf-sys might not link properly.
     esp_idf_svc::sys::link_patches();
 
-    // Bind the log crate to the ESP Logging facilities
+    // bind the log crate to the ESP Logging facilities
     esp_idf_svc::log::EspLogger::initialize_default();
 
     let _led = LedGuard::new();

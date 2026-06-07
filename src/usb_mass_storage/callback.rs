@@ -4,7 +4,7 @@ use esp_idf_sys::usb_msc::msc_host_event_t;
 
 use crate::usb_mass_storage::UsbMassStorage;
 
-/// global driver instance
+// global driver instance
 static mut GLOBAL_MSC: *mut UsbMassStorage = ptr::null_mut();
 
 pub fn set_global_mass_storage(driver: &mut UsbMassStorage){
@@ -19,7 +19,7 @@ pub fn get_global_mass_storage() -> Option<&'static mut UsbMassStorage>{
     }
 }
 
-/// callback function when an msc event is triggered
+// callback function when an msc event is triggered
 pub unsafe extern "C" fn msc_event_cb(event: *const msc_host_event_t, _arg: *mut core::ffi::c_void){
     if GLOBAL_MSC.is_null(){
         log::error!("MSC callback called but GLOBAL_MSC is NULL");
